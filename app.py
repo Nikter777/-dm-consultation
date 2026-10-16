@@ -5,7 +5,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-from auth import is_admin, student_login, student_logout
+from auth import is_admin, logout, student_login
 from questions import add_question, init_db
 
 
@@ -18,6 +18,7 @@ st.set_page_config(
 
 
 MODEL = "gemini-3.5-flash-lite"
+
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
 
 SYSTEM_PROMPT = """
@@ -41,10 +42,14 @@ SYSTEM_PROMPT = """
 11. При необходимости задавай наводящие вопросы.
 12. Если вопрос невозможно уверенно разрешить, предложи обратиться
 к преподавателю в Telegram.
-13. Старайся помогать студенту самостоятельно понять решение.
-14. Для сложных задач сначала объясняй идею, затем формальное решение.
-15. Если задача не относится к дискретной математике, вежливо сообщи,
-что консультант специализируется на дискретной математике.
+13. Не подтверждай правильность решения, пока не проверишь
+все математические преобразования.
+14. Если на фотографии задача относится не к дискретной математике,
+сообщи об этом и предложи обратиться к преподавателю
+соответствующей дисциплины.
+15. Если студент прислал фотографию, сначала определи,
+что именно на ней написано, и только затем приступай к решению.
+16. Не утверждай, что видишь детали фотографии, если они неразборчивы.
 """
 
 
@@ -127,14 +132,14 @@ st.markdown(
     [data-testid="stChatInput"] {
         border-radius: 14px;
     }
-
-    [data-testid="stChatInput"] textarea {
-        color: #202638;
-    }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+
+if not student_login():
+    st.stop()
 
 
 @st.cache_resource
@@ -147,9 +152,6 @@ def get_client():
 client = get_client()
 
 init_db()
-
-if not student_login():
-    st.stop()
 
 
 if "messages" not in st.session_state:
@@ -194,9 +196,6 @@ def build_contents(messages):
                 )
             )
 
-        if not parts:
-            continue
-
         contents.append(
             types.Content(
                 role=(
@@ -218,34 +217,25 @@ def clear_chat():
     st.session_state.uploader_version += 1
 
 
-def get_uploaded_image(uploaded_file):
-    if uploaded_file is None:
-        return None
-
-    image_bytes = uploaded_file.getvalue()
-
-    if len(image_bytes) > MAX_IMAGE_SIZE:
-        return None
-
-    image_hash = hashlib.sha256(image_bytes).hexdigest()
-
-    return {
-        "data": encode_image(image_bytes),
-        "mime_type": uploaded_file.type,
-        "id": image_hash,
-    }
+def set_pending_prompt(text):
+    st.session_state.pending_prompt = text
 
 
 with st.sidebar:
     st.title("🧠 DM Assistant")
-    if st.button(
-        "🚪 Выйти из консультации",
-        use_container_width=True,
-    ):
-        student_logout()
+
     st.caption(
         "ФКН ВШЭ · Дискретная математика"
     )
+
+    if is_admin():
+        st.success("👨‍🏫 Режим преподавателя")
+
+        if st.button(
+            "📩 Вопросы студентов",
+            use_container_width=True,
+        ):
+            st.switch_page("pages/1_Вопросы.py")
 
     st.divider()
 
@@ -256,13 +246,6 @@ with st.sidebar:
         use_container_width=True,
         on_click=clear_chat,
     )
-
-    if is_admin():
-        st.page_link(
-            "pages/1_Вопросы.py",
-            label="📩 Панель преподавателя",
-            use_container_width=True,
-        )
 
     st.divider()
 
@@ -281,15 +264,11 @@ with st.sidebar:
                 "Размер изображения не должен превышать 10 МБ."
             )
             uploaded_file = None
+
         else:
             st.image(
                 uploaded_file,
                 caption="Прикреплённое решение",
-            )
-
-            st.caption(
-                "Изображение будет отправлено вместе "
-                "со следующим сообщением."
             )
 
     st.divider()
@@ -299,7 +278,8 @@ with st.sidebar:
     with st.expander("Отправить вопрос"):
         with st.form("teacher_question_form"):
             student_name = st.text_input(
-                "Имя или псевдоним"
+                "Имя или псевдоним",
+                max_chars=100,
             )
 
             topic = st.selectbox(
@@ -317,6 +297,7 @@ with st.sidebar:
             question = st.text_area(
                 "Твой вопрос",
                 height=130,
+                max_chars=5000,
             )
 
             submitted = st.form_submit_button(
@@ -333,16 +314,6 @@ with st.sidebar:
                         "Заполни имя и вопрос."
                     )
 
-                elif len(name) > 100:
-                    st.warning(
-                        "Имя слишком длинное."
-                    )
-
-                elif len(text) > 5000:
-                    st.warning(
-                        "Вопрос не должен превышать 5000 символов."
-                    )
-
                 else:
                     try:
                         add_question(
@@ -352,7 +323,7 @@ with st.sidebar:
                         )
 
                         st.success(
-                            "Вопрос сохранён! "
+                            "Вопрос отправлен! "
                             "Преподаватель рассмотрит его позже."
                         )
 
@@ -371,6 +342,12 @@ with st.sidebar:
     )
 
     st.divider()
+
+    if st.button(
+        "🚪 Выйти",
+        use_container_width=True,
+    ):
+        logout()
 
     st.caption(
         "Ответы ИИ могут содержать ошибки. "
@@ -403,47 +380,47 @@ if not st.session_state.messages:
     col1, col2 = st.columns(2)
 
     with col1:
-        if st.button(
+        st.button(
             "📚 Объясни кванторы",
             use_container_width=True,
-        ):
-            st.session_state.pending_prompt = (
+            on_click=set_pending_prompt,
+            args=(
                 "Объясни кванторы всеобщности и существования "
-                "с примерами."
-            )
-            st.rerun()
+                "с примерами.",
+            ),
+        )
 
-        if st.button(
+        st.button(
             "🧩 Разберём логические формулы",
             use_container_width=True,
-        ):
-            st.session_state.pending_prompt = (
+            on_click=set_pending_prompt,
+            args=(
                 "Объясни основные логические операции "
-                "и эквивалентные преобразования формул."
-            )
-            st.rerun()
+                "и эквивалентные преобразования формул.",
+            ),
+        )
 
     with col2:
-        if st.button(
+        st.button(
             "✍️ Проверь моё доказательство",
             use_container_width=True,
-        ):
-            st.session_state.pending_prompt = (
+            on_click=set_pending_prompt,
+            args=(
                 "Помоги проверить моё доказательство. "
-                "Сначала попроси прислать само решение."
-            )
-            st.rerun()
+                "Сначала попроси прислать само решение.",
+            ),
+        )
 
-        if st.button(
+        st.button(
             "🎯 Подготовка к контрольной",
             use_container_width=True,
-        ):
-            st.session_state.pending_prompt = (
+            on_click=set_pending_prompt,
+            args=(
                 "Помоги мне подготовиться к контрольной "
                 "по дискретной математике. "
-                "Сначала уточни темы и мой уровень подготовки."
-            )
-            st.rerun()
+                "Сначала уточни темы и мой уровень подготовки.",
+            ),
+        )
 
 
 for message in st.session_state.messages:
@@ -473,19 +450,25 @@ if st.session_state.pending_prompt:
     st.session_state.pending_prompt = None
 
 
-if prompt:
-    uploaded_image = get_uploaded_image(uploaded_file)
+image_data = None
+mime_type = None
+image_id = None
 
-    image_data = None
-    mime_type = None
-    image_id = None
+if uploaded_file is not None:
+    image_bytes = uploaded_file.getvalue()
 
-    if uploaded_image is not None:
-        image_id = uploaded_image["id"]
+    image_id = hashlib.sha256(
+        image_bytes
+    ).hexdigest()
 
-        if image_id != st.session_state.last_image_id:
-            image_data = uploaded_image["data"]
-            mime_type = uploaded_image["mime_type"]
+    if image_id != st.session_state.last_image_id:
+        image_data = encode_image(image_bytes)
+        mime_type = uploaded_file.type
+
+
+if prompt or image_data:
+    if not prompt:
+        prompt = "Пожалуйста, разбери решение на фотографии."
 
     user_message = {
         "role": "user",
@@ -550,6 +533,5 @@ if prompt:
             except Exception:
                 st.error(
                     "Не удалось получить ответ от ИИ. "
-                    "Возможно, временно превышен лимит запросов. "
-                    "Попробуй немного позже."
+                    "Попробуй отправить сообщение ещё раз."
                 )
