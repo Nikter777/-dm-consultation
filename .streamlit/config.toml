@@ -2,9 +2,12 @@
 base = "light"
 primaryColor = "#6757E8"
 backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F4F5FA"
+secondaryBackgroundColor = "#F7F8FC"
 textColor = "#202638"
-font = "sans serif"
+
+[server]
+maxUploadSize = 10
 
 [client]
-showSidebarNavigation = false
+showErrorDetails = false
+toolbarMode = "minimal"

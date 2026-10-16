@@ -5,12 +5,11 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-from auth import is_admin, logout, student_login
-from questions import add_question, init_db
+from auth import student_login, student_logout
 
 
 st.set_page_config(
-    page_title="DM Assistant | ФКН ВШЭ",
+    page_title="DM Assistant | Дискретная математика",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -21,20 +20,23 @@ MODEL = "gemini-3.5-flash-lite"
 
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
 
+MAX_HISTORY_MESSAGES = 30
+
 SYSTEM_PROMPT = """
 Ты — DM Assistant, учебный ИИ-консультант по дискретной математике
 для студентов факультета компьютерных наук НИУ ВШЭ.
 
-Твоя задача — помогать студентам понимать материал и готовиться
-к контрольным работам.
+Твоя задача — помогать студентам понимать материал, разбирать
+домашние задания, проверять доказательства и готовиться к контрольным.
 
 Правила:
-1. Отвечай на русском языке.
+
+1. Всегда отвечай на русском языке.
 2. Объясняй математические понятия понятно, но строго.
 3. Используй LaTeX для математических формул.
 4. При проверке доказательств анализируй каждый логический переход.
 5. Если студент допустил ошибку, объясняй, где именно она находится.
-6. Не выдумывай условия задач и определения.
+6. Не выдумывай условия задач, определения или содержимое фотографий.
 7. Если фотография нечёткая, попроси прислать более качественную.
 8. Если не уверен в решении, прямо сообщи об этом.
 9. Не выдавай предположения за доказанные математические факты.
@@ -42,14 +44,17 @@ SYSTEM_PROMPT = """
 11. При необходимости задавай наводящие вопросы.
 12. Если вопрос невозможно уверенно разрешить, предложи обратиться
 к преподавателю в Telegram.
-13. Не подтверждай правильность решения, пока не проверишь
-все математические преобразования.
-14. Если на фотографии задача относится не к дискретной математике,
-сообщи об этом и предложи обратиться к преподавателю
-соответствующей дисциплины.
-15. Если студент прислал фотографию, сначала определи,
-что именно на ней написано, и только затем приступай к решению.
-16. Не утверждай, что видишь детали фотографии, если они неразборчивы.
+13. Если студент прислал фотографию решения, сначала внимательно
+прочитай условие и все видимые математические выражения.
+14. Не утверждай, что решение верное, пока не проверишь переходы.
+15. Если условие на фотографии не видно, не восстанавливай его
+по догадкам.
+16. Не подменяй дискретную математику математическим анализом,
+если студент явно не просит об этом.
+17. Если студент просит только подсказку, не раскрывай сразу
+полное решение.
+18. Не утверждай, что имеешь доступ к оценкам, ведомостям
+или личным данным студентов.
 """
 
 
@@ -64,14 +69,6 @@ st.markdown(
     [data-testid="stSidebar"] {
         background: #f7f8fc;
         border-right: 1px solid #e6e8f0;
-    }
-
-    [data-testid="stSidebar"] h1,
-    [data-testid="stSidebar"] h2,
-    [data-testid="stSidebar"] h3,
-    [data-testid="stSidebar"] p,
-    [data-testid="stSidebar"] label {
-        color: #202638;
     }
 
     [data-testid="stChatMessage"] {
@@ -149,24 +146,6 @@ def get_client():
     )
 
 
-client = get_client()
-
-init_db()
-
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "pending_prompt" not in st.session_state:
-    st.session_state.pending_prompt = None
-
-if "uploader_version" not in st.session_state:
-    st.session_state.uploader_version = 0
-
-if "last_image_id" not in st.session_state:
-    st.session_state.last_image_id = None
-
-
 def encode_image(data):
     return base64.b64encode(data).decode("utf-8")
 
@@ -196,6 +175,9 @@ def build_contents(messages):
                 )
             )
 
+        if not parts:
+            continue
+
         contents.append(
             types.Content(
                 role=(
@@ -217,8 +199,38 @@ def clear_chat():
     st.session_state.uploader_version += 1
 
 
-def set_pending_prompt(text):
-    st.session_state.pending_prompt = text
+def generate_answer(messages):
+    client = get_client()
+
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=build_contents(messages),
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.2,
+        ),
+    )
+
+    if not response.text:
+        return (
+            "Не удалось получить содержательный ответ. "
+            "Попробуй переформулировать вопрос."
+        )
+
+    return response.text
+
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "pending_prompt" not in st.session_state:
+    st.session_state.pending_prompt = None
+
+if "uploader_version" not in st.session_state:
+    st.session_state.uploader_version = 0
+
+if "last_image_id" not in st.session_state:
+    st.session_state.last_image_id = None
 
 
 with st.sidebar:
@@ -227,15 +239,6 @@ with st.sidebar:
     st.caption(
         "ФКН ВШЭ · Дискретная математика"
     )
-
-    if is_admin():
-        st.success("👨‍🏫 Режим преподавателя")
-
-        if st.button(
-            "📩 Вопросы студентов",
-            use_container_width=True,
-        ):
-            st.switch_page("pages/1_Вопросы.py")
 
     st.divider()
 
@@ -264,7 +267,6 @@ with st.sidebar:
                 "Размер изображения не должен превышать 10 МБ."
             )
             uploaded_file = None
-
         else:
             st.image(
                 uploaded_file,
@@ -273,65 +275,19 @@ with st.sidebar:
 
     st.divider()
 
-    st.subheader("📩 Вопрос преподавателю")
+    st.subheader("💬 Связь с преподавателем")
 
-    with st.expander("Отправить вопрос"):
-        with st.form("teacher_question_form"):
-            student_name = st.text_input(
-                "Имя или псевдоним",
-                max_chars=100,
-            )
+    st.caption(
+        "ИИ может допускать ошибки. "
+        "Если остались вопросы по домашнему заданию, "
+        "оценке или решению задачи, напиши преподавателю."
+    )
 
-            topic = st.selectbox(
-                "Тема",
-                [
-                    "Логика высказываний",
-                    "Кванторы и предикаты",
-                    "Доказательства",
-                    "Множества",
-                    "Отношения",
-                    "Другое",
-                ],
-            )
-
-            question = st.text_area(
-                "Твой вопрос",
-                height=130,
-                max_chars=5000,
-            )
-
-            submitted = st.form_submit_button(
-                "Отправить преподавателю",
-                use_container_width=True,
-            )
-
-            if submitted:
-                name = student_name.strip()
-                text = question.strip()
-
-                if not name or not text:
-                    st.warning(
-                        "Заполни имя и вопрос."
-                    )
-
-                else:
-                    try:
-                        add_question(
-                            name,
-                            topic,
-                            text,
-                        )
-
-                        st.success(
-                            "Вопрос отправлен! "
-                            "Преподаватель рассмотрит его позже."
-                        )
-
-                    except Exception:
-                        st.error(
-                            "Не удалось сохранить вопрос. "
-                            "Попробуй ещё раз."
-                        )
+    st.link_button(
+        "✉️ Написать в Telegram",
+        "https://t.me/nikter777",
+        use_container_width=True,
+    )
 
     st.divider()
 
@@ -343,16 +299,17 @@ with st.sidebar:
 
     st.divider()
 
-    if st.button(
+    st.button(
         "🚪 Выйти",
         use_container_width=True,
-    ):
-        logout()
+        on_click=student_logout,
+    )
+
+    st.divider()
 
     st.caption(
         "Ответы ИИ могут содержать ошибки. "
-        "Для спорных математических вопросов "
-        "обращайтесь к преподавателю."
+        "Проверяй важные математические утверждения."
     )
 
 
@@ -380,47 +337,47 @@ if not st.session_state.messages:
     col1, col2 = st.columns(2)
 
     with col1:
-        st.button(
+        if st.button(
             "📚 Объясни кванторы",
             use_container_width=True,
-            on_click=set_pending_prompt,
-            args=(
+        ):
+            st.session_state.pending_prompt = (
                 "Объясни кванторы всеобщности и существования "
-                "с примерами.",
-            ),
-        )
+                "с примерами."
+            )
+            st.rerun()
 
-        st.button(
+        if st.button(
             "🧩 Разберём логические формулы",
             use_container_width=True,
-            on_click=set_pending_prompt,
-            args=(
+        ):
+            st.session_state.pending_prompt = (
                 "Объясни основные логические операции "
-                "и эквивалентные преобразования формул.",
-            ),
-        )
+                "и эквивалентные преобразования формул."
+            )
+            st.rerun()
 
     with col2:
-        st.button(
+        if st.button(
             "✍️ Проверь моё доказательство",
             use_container_width=True,
-            on_click=set_pending_prompt,
-            args=(
+        ):
+            st.session_state.pending_prompt = (
                 "Помоги проверить моё доказательство. "
-                "Сначала попроси прислать само решение.",
-            ),
-        )
+                "Сначала попроси прислать само решение."
+            )
+            st.rerun()
 
-        st.button(
+        if st.button(
             "🎯 Подготовка к контрольной",
             use_container_width=True,
-            on_click=set_pending_prompt,
-            args=(
+        ):
+            st.session_state.pending_prompt = (
                 "Помоги мне подготовиться к контрольной "
                 "по дискретной математике. "
-                "Сначала уточни темы и мой уровень подготовки.",
-            ),
-        )
+                "Сначала уточни темы и мой уровень подготовки."
+            )
+            st.rerun()
 
 
 for message in st.session_state.messages:
@@ -494,25 +451,15 @@ if prompt or image_data:
     ):
         with st.spinner("Анализирую задачу..."):
             try:
-                response = client.models.generate_content(
-                    model=MODEL,
-                    contents=build_contents(
-                        st.session_state.messages
-                        + [user_message]
-                    ),
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT,
-                        temperature=0.3,
-                    ),
+                history = (
+                    st.session_state.messages[
+                        -MAX_HISTORY_MESSAGES:
+                    ]
                 )
 
-                answer = response.text
-
-                if not answer:
-                    answer = (
-                        "Не удалось получить содержательный ответ. "
-                        "Попробуй переформулировать вопрос."
-                    )
+                answer = generate_answer(
+                    history + [user_message]
+                )
 
                 st.markdown(answer)
 
@@ -533,5 +480,5 @@ if prompt or image_data:
             except Exception:
                 st.error(
                     "Не удалось получить ответ от ИИ. "
-                    "Попробуй отправить сообщение ещё раз."
+                    "Попробуй ещё раз немного позже."
                 )
